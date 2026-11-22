@@ -4,8 +4,8 @@ data class PermissionStatus(
     val overlayGranted: Boolean = false,
     val micGranted: Boolean = false,
     val notificationsGranted: Boolean = false,
-    val projectionGranted: Boolean = false,
+    val screenAccessGranted: Boolean = false,
 ) {
     val allGranted: Boolean
-        get() = overlayGranted && micGranted && notificationsGranted && projectionGranted
+        get() = overlayGranted && micGranted && notificationsGranted && screenAccessGranted
 }

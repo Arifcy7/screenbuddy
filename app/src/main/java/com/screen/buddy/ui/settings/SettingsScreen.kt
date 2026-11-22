@@ -49,17 +49,21 @@ fun SettingsScreen(
         TextButton(onClick = onBack) { Text("Back") }
         Text("Settings", style = MaterialTheme.typography.headlineMedium)
 
-        Text("Input mode", style = MaterialTheme.typography.titleMedium)
+        Text("Bubble gesture", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Buddy always keeps listening after it answers. Tap starts, interrupts, or stops.",
+            style = MaterialTheme.typography.bodySmall,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = inputMode == InputMode.HOLD,
-                onClick = { viewModel.setInputMode(InputMode.HOLD) },
-                label = { Text("Hold to talk") },
-            )
             FilterChip(
                 selected = inputMode == InputMode.TAP,
                 onClick = { viewModel.setInputMode(InputMode.TAP) },
-                label = { Text("Tap to toggle") },
+                label = { Text("Tap (recommended)") },
+            )
+            FilterChip(
+                selected = inputMode == InputMode.HOLD,
+                onClick = { viewModel.setInputMode(InputMode.HOLD) },
+                label = { Text("Hold also starts") },
             )
         }
 

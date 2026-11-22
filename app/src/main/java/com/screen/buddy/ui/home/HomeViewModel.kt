@@ -3,12 +3,13 @@ package com.screen.buddy.ui.home
 import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.screen.buddy.capture.ProjectionHolder
+import com.screen.buddy.capture.ScreenAccess
 import com.screen.buddy.data.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -16,7 +17,7 @@ import javax.inject.Inject
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
-    projectionHolder: ProjectionHolder,
+    screenAccess: ScreenAccess,
 ) : ViewModel() {
 
     val paused = settingsRepository.paused.stateIn(
@@ -25,7 +26,8 @@ class HomeViewModel @Inject constructor(
         false,
     )
 
-    val needsReconsent = projectionHolder.needsReconsent.stateIn(
+    /** True while Buddy's accessibility service is switched off, so it cannot see the screen. */
+    val screenAccessOff = screenAccess.isActive.map { !it }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
         false,

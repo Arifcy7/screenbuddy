@@ -34,8 +34,8 @@ class SettingsRepository @Inject constructor(
 
     val onboardingDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.onboardingDone] ?: false }
     val inputMode: Flow<InputMode> = context.dataStore.data.map {
-        runCatching { InputMode.valueOf(it[Keys.inputMode] ?: InputMode.HOLD.name) }
-            .getOrDefault(InputMode.HOLD)
+        runCatching { InputMode.valueOf(it[Keys.inputMode] ?: InputMode.TAP.name) }
+            .getOrDefault(InputMode.TAP)
     }
     val voice: Flow<String> = context.dataStore.data.map { it[Keys.voice] ?: "Fenrir" }
     val languageHint: Flow<String> = context.dataStore.data.map { it[Keys.languageHint] ?: "" }

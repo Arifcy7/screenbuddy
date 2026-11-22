@@ -16,10 +16,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
@@ -165,25 +167,48 @@ class BubbleWindow(
 @Composable
 private fun BubbleContent(state: SessionState) {
     val color = when (state) {
-        is SessionState.Idle -> Color(0xFF546E7A)
-        is SessionState.Connecting -> Color(0xFFFFB300)
-        is SessionState.Listening -> Color(0xFF43A047)
-        is SessionState.Thinking -> Color(0xFF1E88E5)
-        is SessionState.Speaking -> Color(0xFF8E24AA)
-        is SessionState.Error -> Color(0xFFE53935)
+        is SessionState.Idle -> Color(0xFF2A3544)
+        is SessionState.Connecting -> Color(0xFFF5B942)
+        is SessionState.Listening -> Color(0xFF2DD4BF)
+        is SessionState.Thinking -> Color(0xFF42A5F5)
+        is SessionState.Speaking -> Color(0xFFFF6B6B)
+        is SessionState.Error -> Color(0xFFFF5252)
     }
+    val active = state !is SessionState.Idle
     val pulse = rememberInfiniteTransition(label = "pulse")
     val scale by pulse.animateFloat(
         initialValue = 1f,
-        targetValue = if (state !is SessionState.Idle) 1.12f else 1f,
-        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+        targetValue = if (active) 1.14f else 1f,
+        animationSpec = infiniteRepeatable(tween(if (active) 650 else 2_000), RepeatMode.Reverse),
         label = "scale",
     )
-    Box(
-        modifier = Modifier
-            .size(56.dp)
-            .scale(scale)
-            .clip(CircleShape)
-            .background(color),
+    val ring by pulse.animateFloat(
+        initialValue = 0.35f,
+        targetValue = if (active) 0.85f else 0.35f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "ring",
     )
+    Box(contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .scale(scale * 1.18f)
+                .clip(CircleShape)
+                .background(color.copy(alpha = ring * 0.28f)),
+        )
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .scale(scale)
+                .clip(CircleShape)
+                .background(color),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "B",
+                color = Color(0xFF070B10),
+                style = MaterialTheme.typography.titleLarge,
+            )
+        }
+    }
 }

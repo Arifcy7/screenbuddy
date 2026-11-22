@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.media.projection.MediaProjectionManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -65,12 +64,6 @@ fun OnboardingScreen(
         ActivityResultContracts.RequestPermission(),
     ) { viewModel.refresh() }
 
-    val projectionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        viewModel.onProjectionResult(result.resultCode, result.data)
-    }
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -80,7 +73,7 @@ fun OnboardingScreen(
     ) {
         Text("Welcome to Buddy", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Grant these so Buddy can float over apps, hear you, and see one screenshot when you summon it.",
+            "Grant these so Buddy can float over apps, hear you, and see your screen when you summon it.",
             style = MaterialTheme.typography.bodyMedium,
         )
 
@@ -109,13 +102,19 @@ fun OnboardingScreen(
             )
         }
         PermissionStep(
-            title = "Screen capture",
-            granted = status.projectionGranted,
-            onAction = {
-                val mpm = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-                    as MediaProjectionManager
-                projectionLauncher.launch(mpm.createScreenCaptureIntent())
-            },
+            title = "Screen access",
+            granted = status.screenAccessGranted,
+            onAction = { context.startActivity(viewModel.accessibilitySettingsIntent()) },
+            actionLabel = if (status.screenAccessGranted) "On" else "Turn on",
+        )
+        Text(
+            "Screen access uses an accessibility service. Find Buddy in the list that opens " +
+                "and switch it on. Buddy only takes a screenshot and reads on-screen labels " +
+                "when you tap its bubble, sends them to Google's Gemini service to answer " +
+                "you, and never taps or types on your phone. If Android says the setting is " +
+                "restricted, open Buddy's App info, tap the ⋮ menu and choose " +
+                "\"Allow restricted settings\".",
+            style = MaterialTheme.typography.bodySmall,
         )
 
         Spacer(Modifier.height(8.dp))

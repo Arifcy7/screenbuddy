@@ -15,9 +15,8 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.screen.buddy.MainActivity
 import com.screen.buddy.R
-import com.screen.buddy.capture.ProjectionHolder
+import com.screen.buddy.capture.ScreenAccess
 import com.screen.buddy.capture.ScreenCaptureManager
-import com.screen.buddy.data.InputMode
 import com.screen.buddy.data.SettingsRepository
 import com.screen.buddy.live.LiveSessionManager
 import com.screen.buddy.live.SessionState
@@ -25,10 +24,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
@@ -36,7 +32,7 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class OverlayService : Service() {
 
-    @Inject lateinit var projectionHolder: ProjectionHolder
+    @Inject lateinit var screenAccess: ScreenAccess
     @Inject lateinit var screenCaptureManager: ScreenCaptureManager
     @Inject lateinit var liveSessionManager: LiveSessionManager
     @Inject lateinit var drawingState: DrawingState
@@ -50,25 +46,21 @@ class OverlayService : Service() {
     private var bubbleWindow: BubbleWindow? = null
     private var drawingWindow: DrawingWindow? = null
     private var paused = false
-    private var holdActive = false
-
-    private lateinit var drawingDuration: StateFlow<Int>
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
         lifecycleOwner = OverlayLifecycleOwner().also { it.onCreate() }
-        drawingDuration = settingsRepository.drawingDurationSec
-            .stateIn(mainScope, SharingStarted.Eagerly, 8)
-        projectionHolder.onProjectionStopped = {
-            screenCaptureManager.stopPipeline()
+        mainScope.launch {
+            // "Drawing duration" in Settings is how long pointer marks stay.
+            settingsRepository.drawingDurationSec.collect { drawingState.pointerTtlMs = it * 1000L }
         }
         startAsForeground()
-        projectionHolder.ensureProjection()
-        screenCaptureManager.startPipeline()
+        screenCaptureManager.refreshGeometry()
         showWindows()
         observeGestures()
         observePause()
+        observeDrawings()
         Timber.d("OverlayService created")
     }
 
@@ -78,15 +70,11 @@ class OverlayService : Service() {
                 paused = true
                 settingsRepository.setPaused(true)
                 liveSessionManager.closeWarmSession(ioScope)
-                screenCaptureManager.stopPipeline()
-                projectionHolder.clear()
                 Toast.makeText(this@OverlayService, R.string.paused, Toast.LENGTH_SHORT).show()
             }
             ACTION_RESUME -> mainScope.launch {
                 paused = false
                 settingsRepository.setPaused(false)
-                projectionHolder.ensureProjection()
-                screenCaptureManager.startPipeline()
             }
             ACTION_QUIT -> {
                 liveSessionManager.closeWarmSession(ioScope)
@@ -94,16 +82,7 @@ class OverlayService : Service() {
             }
             ACTION_DEBUG_DRAW -> {
                 drawingState.clear()
-                drawingState.add(
-                    DrawOp.Ring(500, 500, "center", resources.configuration.orientation),
-                )
-            }
-            else -> {
-                // Fresh consent while service already running (re-enable screen access).
-                if (projectionHolder.hasConsent()) {
-                    projectionHolder.ensureProjection()
-                    screenCaptureManager.startPipeline()
-                }
+                drawingState.add(DrawOp.Ring(500, 500, "center"))
             }
         }
         return START_STICKY
@@ -111,38 +90,29 @@ class OverlayService : Service() {
 
     private fun startAsForeground() {
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-            )
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        // minSdk 30: the microphone type is always available.
+        startForeground(
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+        )
     }
 
     private fun showWindows() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        bubbleWindow = BubbleWindow(
-            applicationContext,
-            wm,
-            lifecycleOwner,
-            liveSessionManager.state,
-        ).also { it.show() }
+        // Board first, bubble second: the bubble must stay visible on top of opaque panels.
         drawingWindow = DrawingWindow(
             applicationContext,
             wm,
             lifecycleOwner,
             drawingState,
-            drawingDuration,
+            screenCaptureManager.geometry,
+        ).also { it.show() }
+        bubbleWindow = BubbleWindow(
+            applicationContext,
+            wm,
+            lifecycleOwner,
+            liveSessionManager.state,
         ).also { it.show() }
     }
 
@@ -154,36 +124,28 @@ class OverlayService : Service() {
                     Toast.makeText(this@OverlayService, R.string.paused, Toast.LENGTH_SHORT).show()
                     return@collect
                 }
-                val mode = settingsRepository.inputMode.first()
                 when (gesture) {
-                    BubbleGesture.Tap -> {
-                        drawingState.clear()
-                        if (mode == InputMode.TAP) {
-                            if (liveSessionManager.state.value is SessionState.Idle ||
-                                liveSessionManager.state.value is SessionState.Error
-                            ) {
-                                summon(pushToTalk = false)
-                            } else {
-                                liveSessionManager.stopTurn(ioScope)
-                            }
-                        } else {
-                            // Hold mode: tap clears drawings / cancels
-                            liveSessionManager.stopTurn(ioScope)
-                        }
-                    }
-                    BubbleGesture.HoldStart -> {
-                        if (mode == InputMode.HOLD) {
-                            holdActive = true
-                            summon(pushToTalk = true)
-                        }
-                    }
-                    BubbleGesture.HoldEnd -> {
-                        if (mode == InputMode.HOLD && holdActive) {
-                            holdActive = false
-                            ioScope.launch { liveSessionManager.endUserTurn() }
-                        }
-                    }
+                    // Continuous conversation: Buddy listens after every answer. Hold and tap
+                    // both just start / interrupt / stop — never force push-to-talk.
+                    BubbleGesture.Tap, BubbleGesture.HoldStart -> onBubbleTap()
+                    BubbleGesture.HoldEnd -> Unit
                 }
+            }
+        }
+    }
+
+    /** One tap does the obvious thing for the current state, in either input mode. */
+    private fun onBubbleTap() {
+        when (liveSessionManager.state.value) {
+            // Start a conversation.
+            is SessionState.Idle, is SessionState.Error -> summon(pushToTalk = false)
+            // Buddy is talking (or about to): cut in and listen again. The board stays.
+            is SessionState.Speaking, is SessionState.Thinking ->
+                liveSessionManager.interrupt(ioScope)
+            // It is listening or connecting: end the conversation and wipe the board.
+            else -> {
+                liveSessionManager.stopTurn(ioScope)
+                drawingState.clear()
             }
         }
     }
@@ -194,23 +156,36 @@ class OverlayService : Service() {
         }
     }
 
+    private fun observeDrawings() {
+        mainScope.launch {
+            drawingState.ops.collect { ops ->
+                if (ops.isNotEmpty()) {
+                    Timber.d("Drawing overlay ops=%d — bringing window to front", ops.size)
+                    drawingWindow?.bringToFront()
+                }
+            }
+        }
+    }
+
     private fun summon(pushToTalk: Boolean) {
         ioScope.launch {
             try {
-                if (!projectionHolder.hasConsent() || projectionHolder.needsReconsent.value) {
-                    showToast(getString(R.string.projection_stopped_body))
+                if (!screenAccess.isActive.value) {
+                    showToast(getString(R.string.screen_access_off))
                     return@launch
-                }
-                if (!projectionHolder.isActive.value) {
-                    projectionHolder.ensureProjection()
-                    screenCaptureManager.startPipeline()
                 }
                 val voice = settingsRepository.voice.first()
                 val lang = settingsRepository.languageHint.first()
                 val capture = screenCaptureManager.captureOnce()
+                capture.bitmap?.recycle()
+                if (capture.jpeg == null && !capture.isSecureBlack) {
+                    showToast(getString(R.string.screen_capture_failed))
+                    return@launch
+                }
                 liveSessionManager.startTurn(
                     scope = ioScope,
                     jpegFrame = capture.jpeg,
+                    screenElements = capture.elements,
                     secureBlack = capture.isSecureBlack,
                     voiceName = voice,
                     languageHint = lang,
@@ -276,9 +251,6 @@ class OverlayService : Service() {
         bubbleWindow?.hide()
         drawingWindow?.hide()
         lifecycleOwner.onDestroy()
-        screenCaptureManager.stopPipeline()
-        projectionHolder.onProjectionStopped = null
-        projectionHolder.clear()
         job.cancel()
         super.onDestroy()
     }

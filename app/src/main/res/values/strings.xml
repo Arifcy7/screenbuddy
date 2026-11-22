@@ -5,8 +5,10 @@
     <string name="action_pause">Pause</string>
     <string name="action_quit">Quit</string>
     <string name="paused">Buddy paused</string>
-    <string name="projection_stopped_title">Screen access ended</string>
-    <string name="projection_stopped_body">Tap to re-enable screen access in Buddy</string>
+    <string name="screen_access_off">Turn on Buddy in Settings › Accessibility so it can see your screen</string>
+    <string name="screen_capture_failed">Couldn\'t read the screen — try again</string>
+    <string name="accessibility_summary">Lets Buddy see the screen when you tap its bubble</string>
+    <string name="accessibility_description">When you tap or hold the Buddy bubble, Buddy takes a screenshot and reads the labels and positions of what is on screen, so it can answer your question and point at the right place. The screenshot is sent to Google\'s Gemini service to produce the answer and is not stored. Buddy never taps, types or changes anything on your phone, and does nothing while the bubble is idle.</string>
     <string name="battery_hint_title">Battery optimization</string>
     <string name="battery_hint_body">Some phones stop overlays in the background. Disable battery optimization for Buddy for reliable use.</string>
 </resources>

@@ -10,6 +10,10 @@ interface MessageDao {
     @Query("SELECT * FROM messages ORDER BY createdAtEpochMs ASC")
     fun observeAll(): Flow<List<MessageEntity>>
 
+    /** Newest first. Used to give a brand-new Live session the gist of the last conversation. */
+    @Query("SELECT * FROM messages ORDER BY createdAtEpochMs DESC, id DESC LIMIT :limit")
+    suspend fun recent(limit: Int): List<MessageEntity>
+
     @Insert
     suspend fun insert(message: MessageEntity): Long
 

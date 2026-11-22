@@ -2,21 +2,17 @@ package com.screen.buddy.capture
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.PixelFormat
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
-import android.media.Image
-import android.media.ImageReader
-import android.os.Handler
-import android.os.HandlerThread
+import android.view.WindowInsets
 import android.view.WindowManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
-import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
@@ -26,166 +22,115 @@ data class CaptureResult(
     val jpeg: ByteArray?,
     val isSecureBlack: Boolean,
     val orientation: Int,
+    /** Labelled on-screen elements with exact boxes in 0-1000 screenshot space, if readable. */
+    val elements: String? = null,
 )
 
 /**
- * Keeps one VirtualDisplay for the life of the MediaProjection.
- * Android 14+ forbids createVirtualDisplay more than once on the same projection instance.
+ * Full-display capture size plus the content region sent to the model
+ * (system bars cropped). Drawing overlay maps 0-1000 into [offset + content].
+ */
+data class CaptureGeometry(
+    val fullWidth: Int = 0,
+    val fullHeight: Int = 0,
+    val contentOffsetX: Int = 0,
+    val contentOffsetY: Int = 0,
+    val contentWidth: Int = 0,
+    val contentHeight: Int = 0,
+)
+
+/**
+ * One-shot screen captures through the accessibility service: a screenshot on demand, with no
+ * running recording, no "sharing screen" indicator and no consent to renew.
  */
 @Singleton
 class ScreenCaptureManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val projectionHolder: ProjectionHolder,
+    private val screenAccess: ScreenAccess,
     private val frameEncoder: FrameEncoder,
 ) {
     @Volatile
     var lastDebugBitmap: Bitmap? = null
         private set
 
-    private val lock = Any()
-    private var captureThread: HandlerThread? = null
-    private var captureHandler: Handler? = null
-    private var imageReader: ImageReader? = null
-    private var virtualDisplay: VirtualDisplay? = null
-    private var displayWidth = 0
-    private var displayHeight = 0
-    private val latestImage = AtomicReference<Image?>(null)
+    private val captureMutex = Mutex()
 
-    fun startPipeline() {
-        synchronized(lock) {
-            if (virtualDisplay != null) return
-            val projection = projectionHolder.ensureProjection() ?: run {
-                Timber.w("startPipeline: no MediaProjection")
-                return
-            }
-            val bounds = context.getSystemService(WindowManager::class.java)
-                .currentWindowMetrics.bounds
-            val width = bounds.width()
-            val height = bounds.height()
-            val density = context.resources.displayMetrics.densityDpi
+    private val _geometry = MutableStateFlow(CaptureGeometry())
+    val geometry: StateFlow<CaptureGeometry> = _geometry.asStateFlow()
 
-            val thread = HandlerThread("buddy-capture").also { it.start() }
-            val handler = Handler(thread.looper)
-            val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
-            reader.setOnImageAvailableListener({ imgReader ->
-                val image = imgReader.acquireLatestImage() ?: return@setOnImageAvailableListener
-                latestImage.getAndSet(image)?.close()
-            }, handler)
-
-            try {
-                val display = projection.createVirtualDisplay(
-                    "buddy-capture",
-                    width,
-                    height,
-                    density,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    reader.surface,
-                    null,
-                    handler,
-                )
-                captureThread = thread
-                captureHandler = handler
-                imageReader = reader
-                virtualDisplay = display
-                displayWidth = width
-                displayHeight = height
-                Timber.d("Capture pipeline started %dx%d", width, height)
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to start capture pipeline")
-                reader.close()
-                thread.quitSafely()
-                projectionHolder.revokeConsent()
-            }
-        }
-    }
-
-    fun stopPipeline() {
-        synchronized(lock) {
-            latestImage.getAndSet(null)?.close()
-            try {
-                virtualDisplay?.release()
-            } catch (_: Exception) {
-            }
-            try {
-                imageReader?.close()
-            } catch (_: Exception) {
-            }
-            captureThread?.quitSafely()
-            virtualDisplay = null
-            imageReader = null
-            captureHandler = null
-            captureThread = null
-            displayWidth = 0
-            displayHeight = 0
-            Timber.d("Capture pipeline stopped")
-        }
+    /** Recompute where app content sits on the display (also done on every capture). */
+    fun refreshGeometry() {
+        val wm = context.getSystemService(WindowManager::class.java)
+        val bounds = wm.currentWindowMetrics.bounds
+        refreshGeometry(wm, bounds.width(), bounds.height())
     }
 
     suspend fun captureOnce(): CaptureResult = withContext(Dispatchers.IO) {
-        if (virtualDisplay == null) {
-            startPipeline()
-        }
-        if (virtualDisplay == null) {
-            return@withContext CaptureResult(null, null, false, currentOrientation())
-        }
-
-        val orientation = currentOrientation()
-        // Drop stale frame, wait for a fresh one after summon.
-        latestImage.getAndSet(null)?.close()
-        val image = withTimeoutOrNull(1_500) {
-            var frame: Image? = null
-            while (frame == null) {
-                frame = latestImage.getAndSet(null)
-                if (frame == null) delay(16)
+        captureMutex.withLock {
+            val orientation = currentOrientation()
+            val full = screenAccess.screenshot()
+            if (full == null) {
+                Timber.w("No screenshot (accessibility service off or capture failed)")
+                return@withLock CaptureResult(null, null, false, orientation)
             }
-            frame
-        }
+            try {
+                val wm = context.getSystemService(WindowManager::class.java)
+                refreshGeometry(wm, full.width, full.height)
+                val geo = _geometry.value
+                val content = cropToContent(full, geo)
+                if (content !== full) full.recycle()
 
-        if (image == null) {
-            Timber.w("Timed out waiting for screen frame")
-            return@withContext CaptureResult(null, null, false, orientation)
-        }
+                val secure = isMostlyBlack(content)
+                lastDebugBitmap?.recycle()
+                lastDebugBitmap = content.copy(content.config ?: Bitmap.Config.ARGB_8888, false)
 
-        try {
-            val bitmap = imageToBitmap(image, displayWidth, displayHeight)
-            val secure = isMostlyBlack(bitmap)
-            lastDebugBitmap?.recycle()
-            lastDebugBitmap = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                if (secure) {
+                    content.recycle()
+                    return@withLock CaptureResult(null, null, true, orientation)
+                }
 
-            if (secure) {
-                bitmap.recycle()
-                return@withContext CaptureResult(null, null, true, orientation)
+                val jpeg = frameEncoder.encode(content)
+                CaptureResult(content, jpeg, false, orientation, screenAccess.describeElements(geo))
+            } catch (e: Exception) {
+                Timber.e(e, "Frame convert failed")
+                CaptureResult(null, null, false, orientation)
             }
-
-            val jpeg = frameEncoder.encode(bitmap)
-            CaptureResult(bitmap, jpeg, false, orientation)
-        } catch (e: Exception) {
-            Timber.e(e, "Frame convert failed")
-            CaptureResult(null, null, false, orientation)
-        } finally {
-            image.close()
         }
     }
 
-    private fun imageToBitmap(image: Image, width: Int, height: Int): Bitmap {
-        val plane = image.planes[0]
-        val buffer = plane.buffer
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val rowPadding = rowStride - pixelStride * width
-        val bitmap = Bitmap.createBitmap(
-            width + rowPadding / pixelStride,
-            height,
-            Bitmap.Config.ARGB_8888,
+    private fun refreshGeometry(wm: WindowManager, width: Int, height: Int) {
+        val insets = wm.currentWindowMetrics.windowInsets
+        val bars = insets.getInsets(
+            WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout(),
         )
-        bitmap.copyPixelsFromBuffer(buffer)
-        return if (rowPadding == 0) {
-            bitmap
-        } else {
-            Bitmap.createBitmap(bitmap, 0, 0, width, height).also {
-                if (it !== bitmap) bitmap.recycle()
-            }
+        val nav = insets.getInsets(WindowInsets.Type.navigationBars())
+        val top = bars.top
+        val left = bars.left
+        val right = bars.right
+        val bottom = nav.bottom
+        val contentW = (width - left - right).coerceAtLeast(1)
+        val contentH = (height - top - bottom).coerceAtLeast(1)
+        _geometry.value = CaptureGeometry(
+            fullWidth = width,
+            fullHeight = height,
+            contentOffsetX = left,
+            contentOffsetY = top,
+            contentWidth = contentW,
+            contentHeight = contentH,
+        )
+    }
+
+    private fun cropToContent(full: Bitmap, geo: CaptureGeometry): Bitmap {
+        if (geo.contentWidth <= 0 || geo.contentHeight <= 0) return full
+        if (geo.contentOffsetX == 0 && geo.contentOffsetY == 0 &&
+            geo.contentWidth == full.width && geo.contentHeight == full.height
+        ) {
+            return full
         }
+        val w = geo.contentWidth.coerceAtMost(full.width - geo.contentOffsetX)
+        val h = geo.contentHeight.coerceAtMost(full.height - geo.contentOffsetY)
+        if (w <= 0 || h <= 0) return full
+        return Bitmap.createBitmap(full, geo.contentOffsetX, geo.contentOffsetY, w, h)
     }
 
     fun isMostlyBlack(bitmap: Bitmap, sampleStep: Int = 32, threshold: Int = 8): Boolean {

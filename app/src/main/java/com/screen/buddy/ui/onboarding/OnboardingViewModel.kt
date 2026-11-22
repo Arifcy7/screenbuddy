@@ -1,7 +1,6 @@
 package com.screen.buddy.ui.onboarding
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,7 +10,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.screen.buddy.capture.ProjectionHolder
+import com.screen.buddy.capture.ScreenAccess
 import com.screen.buddy.data.SettingsRepository
 import com.screen.buddy.overlay.OverlayService
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -28,7 +27,7 @@ import javax.inject.Inject
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val projectionHolder: ProjectionHolder,
+    private val screenAccess: ScreenAccess,
     private val settingsRepository: SettingsRepository,
 ) : ViewModel() {
 
@@ -36,9 +35,8 @@ class OnboardingViewModel @Inject constructor(
 
     val status: StateFlow<PermissionStatus> = combine(
         _refresh,
-        projectionHolder.isActive,
-        projectionHolder.needsReconsent,
-    ) { _, active, needsReconsent ->
+        screenAccess.isActive,
+    ) { _, screenAccessOn ->
         PermissionStatus(
             overlayGranted = Settings.canDrawOverlays(context),
             micGranted = ContextCompat.checkSelfPermission(
@@ -53,7 +51,7 @@ class OnboardingViewModel @Inject constructor(
                     Manifest.permission.POST_NOTIFICATIONS,
                 ) == PackageManager.PERMISSION_GRANTED
             },
-            projectionGranted = active || (projectionHolder.hasConsent() && !needsReconsent),
+            screenAccessGranted = screenAccessOn,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PermissionStatus())
 
@@ -68,16 +66,9 @@ class OnboardingViewModel @Inject constructor(
         )
     }
 
-    fun onProjectionResult(resultCode: Int, data: Intent?) {
-        if (resultCode == Activity.RESULT_OK && data != null) {
-            projectionHolder.storeConsent(resultCode, data)
-            OverlayService.start(context)
-            // Projection is created inside the service after startForeground.
-        } else {
-            projectionHolder.revokeConsent()
-        }
-        refresh()
-    }
+    /** The system screen where the user switches Buddy's accessibility service on. */
+    fun accessibilitySettingsIntent(): Intent =
+        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     fun completeOnboarding() {
         viewModelScope.launch {
