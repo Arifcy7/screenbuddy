@@ -1,3 +1,12 @@
 <resources>
     <string name="app_name">Buddy</string>
+    <string name="notif_title">Buddy is ready</string>
+    <string name="notif_body">Hold the bubble to ask about your screen</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_quit">Quit</string>
+    <string name="paused">Buddy paused</string>
+    <string name="projection_stopped_title">Screen access ended</string>
+    <string name="projection_stopped_body">Tap to re-enable screen access in Buddy</string>
+    <string name="battery_hint_title">Battery optimization</string>
+    <string name="battery_hint_body">Some phones stop overlays in the background. Disable battery optimization for Buddy for reliable use.</string>
 </resources>

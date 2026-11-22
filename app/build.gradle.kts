@@ -16,7 +16,8 @@ android {
 
     defaultConfig {
         applicationId = "com.screen.buddy"
-        minSdk = 29
+        // Spec asked for 29, but WindowManager.currentWindowMetrics (required for coords) is API 30+.
+        minSdk = 30
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
@@ -64,6 +65,9 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.androidx.hilt.navigation.compose)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)

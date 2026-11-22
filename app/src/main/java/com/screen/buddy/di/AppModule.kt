@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.room.Room
 import com.screen.buddy.data.db.BuddyDatabase
 import com.screen.buddy.data.db.MessageDao
-import com.screen.buddy.overlay.DrawingState
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -15,10 +14,6 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
-
-    @Provides
-    @Singleton
-    fun provideDrawingState(): DrawingState = DrawingState()
 
     @Provides
     @Singleton
