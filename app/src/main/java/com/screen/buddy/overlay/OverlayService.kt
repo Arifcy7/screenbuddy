@@ -43,7 +43,8 @@ class OverlayService : Service() {
     @Inject lateinit var settingsRepository: SettingsRepository
 
     private val job = SupervisorJob()
-    private val scope = CoroutineScope(Dispatchers.Main.immediate + job)
+    private val mainScope = CoroutineScope(Dispatchers.Main.immediate + job)
+    private val ioScope = CoroutineScope(Dispatchers.IO + job)
 
     private lateinit var lifecycleOwner: OverlayLifecycleOwner
     private var bubbleWindow: BubbleWindow? = null
@@ -58,9 +59,13 @@ class OverlayService : Service() {
         createChannels()
         lifecycleOwner = OverlayLifecycleOwner().also { it.onCreate() }
         drawingDuration = settingsRepository.drawingDurationSec
-            .stateIn(scope, SharingStarted.Eagerly, 8)
+            .stateIn(mainScope, SharingStarted.Eagerly, 8)
+        projectionHolder.onProjectionStopped = {
+            screenCaptureManager.stopPipeline()
+        }
         startAsForeground()
         projectionHolder.ensureProjection()
+        screenCaptureManager.startPipeline()
         showWindows()
         observeGestures()
         observePause()
@@ -69,20 +74,22 @@ class OverlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_PAUSE -> scope.launch {
+            ACTION_PAUSE -> mainScope.launch {
                 paused = true
                 settingsRepository.setPaused(true)
-                liveSessionManager.closeWarmSession(scope)
+                liveSessionManager.closeWarmSession(ioScope)
+                screenCaptureManager.stopPipeline()
                 projectionHolder.clear()
                 Toast.makeText(this@OverlayService, R.string.paused, Toast.LENGTH_SHORT).show()
             }
-            ACTION_RESUME -> scope.launch {
+            ACTION_RESUME -> mainScope.launch {
                 paused = false
                 settingsRepository.setPaused(false)
                 projectionHolder.ensureProjection()
+                screenCaptureManager.startPipeline()
             }
             ACTION_QUIT -> {
-                liveSessionManager.closeWarmSession(scope)
+                liveSessionManager.closeWarmSession(ioScope)
                 stopSelf()
             }
             ACTION_DEBUG_DRAW -> {
@@ -90,6 +97,13 @@ class OverlayService : Service() {
                 drawingState.add(
                     DrawOp.Ring(500, 500, "center", resources.configuration.orientation),
                 )
+            }
+            else -> {
+                // Fresh consent while service already running (re-enable screen access).
+                if (projectionHolder.hasConsent()) {
+                    projectionHolder.ensureProjection()
+                    screenCaptureManager.startPipeline()
+                }
             }
         }
         return START_STICKY
@@ -134,7 +148,7 @@ class OverlayService : Service() {
 
     private fun observeGestures() {
         val bubble = bubbleWindow ?: return
-        scope.launch {
+        mainScope.launch {
             bubble.gestures.collect { gesture ->
                 if (paused) {
                     Toast.makeText(this@OverlayService, R.string.paused, Toast.LENGTH_SHORT).show()
@@ -150,11 +164,11 @@ class OverlayService : Service() {
                             ) {
                                 summon(pushToTalk = false)
                             } else {
-                                liveSessionManager.stopTurn(scope)
+                                liveSessionManager.stopTurn(ioScope)
                             }
                         } else {
                             // Hold mode: tap clears drawings / cancels
-                            liveSessionManager.stopTurn(scope)
+                            liveSessionManager.stopTurn(ioScope)
                         }
                     }
                     BubbleGesture.HoldStart -> {
@@ -166,7 +180,7 @@ class OverlayService : Service() {
                     BubbleGesture.HoldEnd -> {
                         if (mode == InputMode.HOLD && holdActive) {
                             holdActive = false
-                            liveSessionManager.endUserTurn()
+                            ioScope.launch { liveSessionManager.endUserTurn() }
                         }
                     }
                 }
@@ -175,23 +189,27 @@ class OverlayService : Service() {
     }
 
     private fun observePause() {
-        scope.launch {
+        mainScope.launch {
             settingsRepository.paused.collect { paused = it }
         }
     }
 
     private fun summon(pushToTalk: Boolean) {
-        scope.launch(Dispatchers.IO) {
+        ioScope.launch {
             try {
-                if (!projectionHolder.hasConsent()) {
+                if (!projectionHolder.hasConsent() || projectionHolder.needsReconsent.value) {
                     showToast(getString(R.string.projection_stopped_body))
                     return@launch
+                }
+                if (!projectionHolder.isActive.value) {
+                    projectionHolder.ensureProjection()
+                    screenCaptureManager.startPipeline()
                 }
                 val voice = settingsRepository.voice.first()
                 val lang = settingsRepository.languageHint.first()
                 val capture = screenCaptureManager.captureOnce()
                 liveSessionManager.startTurn(
-                    scope = scope,
+                    scope = ioScope,
                     jpegFrame = capture.jpeg,
                     secureBlack = capture.isSecureBlack,
                     voiceName = voice,
@@ -202,13 +220,13 @@ class OverlayService : Service() {
             } catch (e: Exception) {
                 Timber.e(e, "Summon failed")
                 showToast(e.message ?: "Summon failed")
-                liveSessionManager.stopTurn(scope)
+                liveSessionManager.stopTurn(ioScope)
             }
         }
     }
 
     private fun showToast(msg: String) {
-        scope.launch(Dispatchers.Main) {
+        mainScope.launch {
             Toast.makeText(this@OverlayService, msg, Toast.LENGTH_SHORT).show()
         }
     }
@@ -254,10 +272,12 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
-        liveSessionManager.closeWarmSession(scope)
+        liveSessionManager.closeWarmSession(ioScope)
         bubbleWindow?.hide()
         drawingWindow?.hide()
         lifecycleOwner.onDestroy()
+        screenCaptureManager.stopPipeline()
+        projectionHolder.onProjectionStopped = null
         projectionHolder.clear()
         job.cancel()
         super.onDestroy()

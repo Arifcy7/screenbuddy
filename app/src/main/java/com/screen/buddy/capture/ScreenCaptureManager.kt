@@ -5,19 +5,20 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.WindowManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.coroutines.resume
 import kotlin.math.abs
 
 data class CaptureResult(
@@ -27,6 +28,10 @@ data class CaptureResult(
     val orientation: Int,
 )
 
+/**
+ * Keeps one VirtualDisplay for the life of the MediaProjection.
+ * Android 14+ forbids createVirtualDisplay more than once on the same projection instance.
+ */
 @Singleton
 class ScreenCaptureManager @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -37,66 +42,112 @@ class ScreenCaptureManager @Inject constructor(
     var lastDebugBitmap: Bitmap? = null
         private set
 
-    suspend fun captureOnce(): CaptureResult = withContext(Dispatchers.IO) {
-        val projection = projectionHolder.ensureProjection()
-            ?: return@withContext CaptureResult(null, null, false, currentOrientation())
+    private val lock = Any()
+    private var captureThread: HandlerThread? = null
+    private var captureHandler: Handler? = null
+    private var imageReader: ImageReader? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var displayWidth = 0
+    private var displayHeight = 0
+    private val latestImage = AtomicReference<Image?>(null)
 
-        val bounds = context.getSystemService(WindowManager::class.java)
-            .currentWindowMetrics.bounds
-        val width = bounds.width()
-        val height = bounds.height()
-        val density = context.resources.displayMetrics.densityDpi
-        val orientation = currentOrientation()
+    fun startPipeline() {
+        synchronized(lock) {
+            if (virtualDisplay != null) return
+            val projection = projectionHolder.ensureProjection() ?: run {
+                Timber.w("startPipeline: no MediaProjection")
+                return
+            }
+            val bounds = context.getSystemService(WindowManager::class.java)
+                .currentWindowMetrics.bounds
+            val width = bounds.width()
+            val height = bounds.height()
+            val density = context.resources.displayMetrics.densityDpi
 
-        val thread = HandlerThread("buddy-capture").also { it.start() }
-        val handler = Handler(thread.looper)
-        var reader: ImageReader? = null
-        var display: VirtualDisplay? = null
+            val thread = HandlerThread("buddy-capture").also { it.start() }
+            val handler = Handler(thread.looper)
+            val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+            reader.setOnImageAvailableListener({ imgReader ->
+                val image = imgReader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                latestImage.getAndSet(image)?.close()
+            }, handler)
 
-        try {
-            val bitmap = suspendCancellableCoroutine { cont ->
-                val resumed = AtomicBoolean(false)
-                reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-                reader!!.setOnImageAvailableListener({ imgReader ->
-                    if (!resumed.compareAndSet(false, true)) {
-                        imgReader.acquireLatestImage()?.close()
-                        return@setOnImageAvailableListener
-                    }
-                    val image = imgReader.acquireLatestImage()
-                    if (image == null) {
-                        cont.resume(null)
-                        return@setOnImageAvailableListener
-                    }
-                    try {
-                        cont.resume(imageToBitmap(image, width, height))
-                    } catch (e: Exception) {
-                        Timber.e(e, "Failed to convert image")
-                        cont.resume(null)
-                    } finally {
-                        image.close()
-                    }
-                }, handler)
-
-                display = projection.createVirtualDisplay(
+            try {
+                val display = projection.createVirtualDisplay(
                     "buddy-capture",
                     width,
                     height,
                     density,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    reader!!.surface,
+                    reader.surface,
                     null,
                     handler,
                 )
-
-                cont.invokeOnCancellation {
-                    // cleaned in finally
-                }
+                captureThread = thread
+                captureHandler = handler
+                imageReader = reader
+                virtualDisplay = display
+                displayWidth = width
+                displayHeight = height
+                Timber.d("Capture pipeline started %dx%d", width, height)
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to start capture pipeline")
+                reader.close()
+                thread.quitSafely()
+                projectionHolder.revokeConsent()
             }
+        }
+    }
 
-            if (bitmap == null) {
-                return@withContext CaptureResult(null, null, false, orientation)
+    fun stopPipeline() {
+        synchronized(lock) {
+            latestImage.getAndSet(null)?.close()
+            try {
+                virtualDisplay?.release()
+            } catch (_: Exception) {
             }
+            try {
+                imageReader?.close()
+            } catch (_: Exception) {
+            }
+            captureThread?.quitSafely()
+            virtualDisplay = null
+            imageReader = null
+            captureHandler = null
+            captureThread = null
+            displayWidth = 0
+            displayHeight = 0
+            Timber.d("Capture pipeline stopped")
+        }
+    }
 
+    suspend fun captureOnce(): CaptureResult = withContext(Dispatchers.IO) {
+        if (virtualDisplay == null) {
+            startPipeline()
+        }
+        if (virtualDisplay == null) {
+            return@withContext CaptureResult(null, null, false, currentOrientation())
+        }
+
+        val orientation = currentOrientation()
+        // Drop stale frame, wait for a fresh one after summon.
+        latestImage.getAndSet(null)?.close()
+        val image = withTimeoutOrNull(1_500) {
+            var frame: Image? = null
+            while (frame == null) {
+                frame = latestImage.getAndSet(null)
+                if (frame == null) delay(16)
+            }
+            frame
+        }
+
+        if (image == null) {
+            Timber.w("Timed out waiting for screen frame")
+            return@withContext CaptureResult(null, null, false, orientation)
+        }
+
+        try {
+            val bitmap = imageToBitmap(image, displayWidth, displayHeight)
             val secure = isMostlyBlack(bitmap)
             lastDebugBitmap?.recycle()
             lastDebugBitmap = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
@@ -108,20 +159,15 @@ class ScreenCaptureManager @Inject constructor(
 
             val jpeg = frameEncoder.encode(bitmap)
             CaptureResult(bitmap, jpeg, false, orientation)
+        } catch (e: Exception) {
+            Timber.e(e, "Frame convert failed")
+            CaptureResult(null, null, false, orientation)
         } finally {
-            try {
-                display?.release()
-            } catch (_: Exception) {
-            }
-            try {
-                reader?.close()
-            } catch (_: Exception) {
-            }
-            thread.quitSafely()
+            image.close()
         }
     }
 
-    private fun imageToBitmap(image: android.media.Image, width: Int, height: Int): Bitmap {
+    private fun imageToBitmap(image: Image, width: Int, height: Int): Bitmap {
         val plane = image.planes[0]
         val buffer = plane.buffer
         val pixelStride = plane.pixelStride
@@ -142,7 +188,6 @@ class ScreenCaptureManager @Inject constructor(
         }
     }
 
-    /** Mean luminance near zero over a sampled grid ⇒ FLAG_SECURE black frame. */
     fun isMostlyBlack(bitmap: Bitmap, sampleStep: Int = 32, threshold: Int = 8): Boolean {
         var sum = 0L
         var count = 0

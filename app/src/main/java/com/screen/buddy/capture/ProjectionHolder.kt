@@ -43,11 +43,16 @@ class ProjectionHolder @Inject constructor(
     private val _needsReconsent = MutableStateFlow(false)
     val needsReconsent: StateFlow<Boolean> = _needsReconsent.asStateFlow()
 
+    @Volatile
+    var onProjectionStopped: (() -> Unit)? = null
+
     fun hasConsent(): Boolean = resultData != null && resultCode == Activity.RESULT_OK
 
     fun storeConsent(resultCode: Int, data: Intent?) {
         this.resultCode = resultCode
         this.resultData = data?.let { Intent(it) }
+        mediaProjection = null
+        _isActive.value = false
         _needsReconsent.value = false
         Timber.d("Projection consent stored: ok=%s", resultCode == Activity.RESULT_OK)
     }
@@ -99,6 +104,11 @@ class ProjectionHolder @Inject constructor(
             mediaProjection = null
             _isActive.value = false
             _needsReconsent.value = true
+            try {
+                onProjectionStopped?.invoke()
+            } catch (e: Exception) {
+                Timber.w(e, "onProjectionStopped listener failed")
+            }
             notifyReEnable()
         }
     }

@@ -23,12 +23,14 @@ import com.screen.buddy.data.db.MessageDao
 import com.screen.buddy.data.db.MessageEntity
 import com.screen.buddy.overlay.DrawingState
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -82,7 +84,8 @@ class LiveSessionManager @Inject constructor(
             }
 
             receiveJob?.cancel()
-            receiveJob = scope.launch {
+            // Always off the main thread — AudioTrack.write / Room would ANR otherwise.
+            receiveJob = scope.launch(Dispatchers.IO) {
                 live.receive()
                     .catch { e ->
                         Timber.e(e, "Live receive failed")
@@ -186,7 +189,7 @@ class LiveSessionManager @Inject constructor(
 
     private fun startMic(scope: CoroutineScope, live: LiveSession) {
         micJob?.cancel()
-        micJob = scope.launch {
+        micJob = scope.launch(Dispatchers.IO) {
             try {
                 micRecorder.start(this).collect { chunk ->
                     if (_state.value is SessionState.Speaking) {
@@ -220,18 +223,22 @@ class LiveSessionManager @Inject constructor(
                                     _state.value = SessionState.Speaking
                                     playedAudio = true
                                 }
-                                pcmPlayer.play(part.inlineData)
+                                withContext(Dispatchers.IO) {
+                                    pcmPlayer.play(part.inlineData)
+                                }
                             }
                         }
                         is TextPart -> {
                             if (part.text.isNotBlank()) {
-                                messageDao.insert(
-                                    MessageEntity(
-                                        role = "assistant",
-                                        text = part.text,
-                                        createdAtEpochMs = System.currentTimeMillis(),
-                                    ),
-                                )
+                                withContext(Dispatchers.IO) {
+                                    messageDao.insert(
+                                        MessageEntity(
+                                            role = "assistant",
+                                            text = part.text,
+                                            createdAtEpochMs = System.currentTimeMillis(),
+                                        ),
+                                    )
+                                }
                             }
                         }
                     }
